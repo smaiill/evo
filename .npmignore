@@ -1,0 +1,10 @@
+example
+node_modules
+scripts
+src
+.bat
+tsconfig.json
+fxmanifest.lua
+.prettierrc
+.prettierignore
+.github
