@@ -1,7 +1,3 @@
-<div align="center">
-    <img src="https://media.discordapp.net/attachments/869266956077912095/1122922188627005531/evo.PNG?width=1394&height=682" />
-</div>
-
 # evo
 
 > ⚠️ This README and the library are still a work in progress (WIP).
@@ -35,7 +31,7 @@ npm install @smaiill/evo
 - pnpm
 
 ```sh
-npm install @smaiill/evo
+pnpm install @smaiill/evo
 ```
 
 ## 📋 API definitions
