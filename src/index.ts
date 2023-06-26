@@ -1,7 +1,13 @@
 import z from 'zod'
-import { COLORS, _customLog, getSrc, uuid } from './utils'
-import { ContractOptions, Errors, defaultContractOptions } from './consts'
-import { EvoOnceError, EvoTimeoutError } from './errors'
+import {
+  ContractOptions,
+  PossibleEnvsCommunication,
+  PossibleEnvsCommunicationKeys,
+  defaultContractOptions,
+} from './consts'
+import { EvoCommunicationError, EvoEnvError, EvoGlobalError } from './errors'
+import { getSrc, isRcEnv, isRsEnv, isUiEnv, uuid } from './utils'
+let contractsLength = 1
 
 type ZodTypeAny = z.ZodType<any, any, any>
 
@@ -9,146 +15,135 @@ export type RetryOptions = {
   /**
    * The delay between each request. Default: 1000.
    */
-  delay: number
+  delay?: number
   /**
-   * The maximum number of retry attempts. Default: 0.
+   * The maximum number of retry attempts, Max value `10`. Default: 0.
    */
   max: number
+  /**
+   * Whether to force the delay to be less than 500ms. Default: false.
+   */
+  forceDelay?: boolean
 }
 
-export type ContractMethodValue = {
+type ContractMethodValue = {
   /**
-   * The Zod schema for method arguments. Default: {}
+   * The Zod schema for method arguments. Default: undefined.
    */
   args?: ZodTypeAny
   /**
-   * The Zod schema for the method return value. Default: {}
+   * The Zod schema for the method return value. Default: undefined.
    */
   returns?: ZodTypeAny
   /**
-   * Retry options for the method. Default: { delay: 1000, max: 0 }
+   * Retry options for the method. Default: { delay: 1000, max: 0, forceDelay: false }.
    */
   retryOptions?: RetryOptions
-  /**
-   * Indicates if the method should be executed only once. Default false
-   */
-  once?: boolean
 }
 
-export type Contract = Record<string, ContractMethodValue>
+export type ContractType = Record<string, ContractMethodValue>
+
+export enum Environments {
+  rs = 'rs',
+  rc = 'rc',
+  ui = 'ui',
+}
+
+export type Envs = keyof typeof Environments
 
 type InferFromSchema<S extends ZodTypeAny | undefined> = S extends ZodTypeAny
   ? z.infer<S>
   : undefined
 
-export type RpcMethod<
+type RpcMethod<
+  CE extends Envs,
+  TE extends Envs,
   M extends ContractMethodValue,
-  Args extends M['args'] = M['args'],
-  Returns extends M['returns'] = M['returns'],
-  ReturnedArgs = Args extends undefined
-    ? Promise<void>
-    : Promise<InferFromSchema<Returns>>,
-> = Args extends ZodTypeAny
-  ? (args: InferFromSchema<Args>, src: number) => ReturnedArgs
-  : (src: number) => ReturnedArgs
+  R extends M['returns'] = M['returns'],
+  A extends M['args'] = M['args'],
+  ReturnedArgs = R extends ZodTypeAny ? Promise<InferFromSchema<R>> : void,
+> = CE extends 'rs'
+  ? A extends ZodTypeAny
+    ? TE extends 'rc'
+      ? (args: InferFromSchema<A>, src: number) => ReturnedArgs
+      : (args: InferFromSchema<A>, src: number) => ReturnedArgs
+    : (src: number) => ReturnedArgs
+  : A extends ZodTypeAny
+  ? (args: InferFromSchema<A>) => ReturnedArgs
+  : () => ReturnedArgs
 
-type ContractWithRpcMethods<C extends Contract> = {
-  [M in keyof C]: RpcMethod<C[M]>
-}
+export type InferRpcMethod<
+  ES extends { currentEnv: Envs; targetEnv: Envs },
+  M extends ContractMethodValue,
+> = RpcMethod<ES['currentEnv'], ES['targetEnv'], M>
 
-type RemoveSrc<T extends (...args: any[]) => any> = T extends (
-  args: infer U,
-  src: infer S,
-) => any
-  ? S extends number
-    ? (args: U) => ReturnType<T>
-    : U extends number
-    ? () => ReturnType<T>
-    : never
-  : never
+type ErrorType = { message: string; type: string }
 
-type ContractWithRpcMethodsClient<C extends Contract> = {
-  [M in keyof C]: RemoveSrc<RpcMethod<C[M]>>
-}
-
-export type ErrorType = {
-  message: string
-  type: string
-}
-
-type ResponseEvent = `${string}::${string}`
-
-type RpcClientResponse<T = unknown> = {
-  ok: boolean
-  data?: T
-  eventName: ResponseEvent
-  error?: ErrorType
-  src?: number
-}
-
-type ServerResponse<T = unknown> =
-  | { ok: false; error: string }
+export type RpcResponse<T = unknown> =
   | { ok: true; data: T }
+  | { ok: false; error: ErrorType }
 
-type ServerLogger = {
-  /**
-   * If the logger should be active or not. Default: `false`
-   */
-  active: boolean
-  /**
-   * The logging format. Default: Request from [`src`] : `args`
-   */
-  logFormat?: (src: number, args: unknown) => void
+type ContractWithRpcMethods<
+  C extends ContractType,
+  CE extends Envs,
+  TE extends Envs,
+> = {
+  [M in keyof C]: RpcMethod<CE, TE, C[M]>
 }
 
-type ServerOptions = {
-  /**
-   * The logger options. See `ServerLogger`
-   */
-  logger: ServerLogger
+type RpcCommunicationConfigurations<
+  CE extends Envs,
+  TE extends Envs,
+> = CE extends 'rc'
+  ? TE extends 'rs'
+    ? {
+        subscribe: (eventName: string, callback: Function) => void
+        fire: (eventName: string, ...args: any[]) => void
+      }
+    : TE extends 'ui'
+    ? { subscribe: (eventName: string, callback: Function) => void }
+    : undefined
+  : CE extends 'rs'
+  ? TE extends 'rc'
+    ? {
+        subscribe: (eventName: string, callback: Function) => void
+        fire: (eventName: string, ...args: any[]) => void
+      }
+    : undefined
+  : CE extends 'ui'
+  ? TE extends 'rc'
+    ? { fire: (eventName: string, ...args: any[]) => Promise<RpcResponse> }
+    : undefined
+  : undefined
+
+const fetchNui = async (eventName: string, req: unknown) => {
+  const options = {
+    method: 'post',
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+    },
+    body: JSON.stringify(req),
+  }
+
+  const resourceName = window.GetParentResourceName
+    ? window.GetParentResourceName()
+    : 'evo'
+
+  const resp = await fetch(`https://${resourceName}/${eventName}`, options)
+
+  if (!resp.ok) {
+    return {
+      ok: false,
+      error: { message: resp.statusText, type: 'EvoFetchError' },
+    }
+  }
+
+  const responseObj = await resp.json()
+  return responseObj
 }
 
-export type MergedContract<C1 extends Contract, C2 extends Contract> = C1 & C2
-
-const emitClientRpcResponse = ({
-  ok,
-  data,
-  eventName,
-  error,
-  src,
-}: RpcClientResponse) => {
-  emitNet(eventName, src, {
-    ok,
-    data,
-    error,
-  })
-}
-
-const emitClientRpcError = (
-  eventName: ResponseEvent,
-  error: ErrorType,
-  src: number,
-) => {
-  emitClientRpcResponse({
-    ok: false,
-    eventName,
-    error,
-    src,
-  })
-}
-
-const emitClientRpcSuccess = (
-  eventName: ResponseEvent,
-  data: unknown,
-  src: number,
-) => {
-  emitClientRpcResponse({
-    ok: true,
-    data,
-    eventName,
-    src,
-  })
-}
+const getCurrentEnv = (): Envs | undefined =>
+  isRcEnv() ? 'rc' : isRsEnv() ? 'rs' : isUiEnv() ? 'ui' : undefined
 
 const getParsedArgs = async ({
   args,
@@ -158,189 +153,378 @@ const getParsedArgs = async ({
   schema: z.Schema
 }) => schema.parse(args)
 
-/**
- * Creates a contract with options.
- *
- * @template {Contract} C - The contract type.
- * @param {C} contract - The contract object.
- * @param {ContractOptions} [options] - The contract options.
- * @returns {{ contract: C; options: ContractOptions }} - The created contract and options object.
- */
-export const createContract = <C extends Contract>(
-  contract: C,
-  options?: ContractOptions,
-): { contract: C; options: ContractOptions } => {
-  const mergedOptions = { ...defaultContractOptions, ...options }
-
-  return { contract, options: mergedOptions }
+const registerNuiCallback = (
+  eventName: string,
+  callback: (data: unknown, cb: (res: unknown) => unknown) => unknown,
+): void => {
+  RegisterNuiCallbackType(eventName)
+  on(`__cfx_nui:${eventName}`, callback)
 }
 
 /**
- * Creates a server with RPC methods based on the given contract.
- *
- * @template {Contract} C - The contract type.
- * @param {C} contract - The contract object.
- * @param {ContractWithRpcMethods<C>} opts - The RPC methods object.
- * @returns {void}
+ * Create a new contract
+ * @template C - The type of the contract.
  */
-export const createServer = <C extends Contract>(
-  contract: C,
-  opts: ContractWithRpcMethods<C>,
-  serverOptions?: ServerOptions,
-): void => {
-  const onceRequests = new Set<string>()
+export class Contract<C extends ContractType> {
+  private _options: ContractOptions
+  private _contract: C
+  private _builded = false
+  private _contractUuid = contractsLength++
+  constructor(contract: C, options?: ContractOptions) {
+    this._contract = contract
+    this._options = options ?? defaultContractOptions
+  }
 
-  const { logger = { active: false } } = serverOptions || {}
+  public build() {
+    const mergedOptions = { ...defaultContractOptions, ...this._options }
 
-  const defauttLogFormat = (src: number, args: unknown) => {
-    _customLog(
-      COLORS.GREEN,
-      `Request from ${COLORS.MAGENTA}[${src}]${COLORS.GREEN} : ${
-        COLORS.MAGENTA
-      }${JSON.stringify(args)}`,
+    this._options = mergedOptions
+    this._builded = true
+    return this
+  }
+
+  public isBuilded() {
+    return this._builded
+  }
+
+  private getRpcMethodsForEnvs<CE extends Envs, TE extends Envs>(
+    currentEnv: CE,
+    targetEnv: TE,
+  ): RpcCommunicationConfigurations<CE, TE> {
+    switch (currentEnv) {
+      case 'rc':
+        switch (targetEnv) {
+          case 'rs':
+            return {
+              subscribe: onNet,
+              fire: emitNet,
+            } as RpcCommunicationConfigurations<CE, TE>
+          case 'ui':
+            return {
+              subscribe: registerNuiCallback,
+            } as RpcCommunicationConfigurations<CE, TE>
+        }
+        break
+      case 'rs':
+        switch (targetEnv) {
+          case 'rc':
+            return {
+              subscribe: onNet,
+              fire: emitNet,
+            } as RpcCommunicationConfigurations<CE, TE>
+        }
+        break
+      case 'ui':
+        switch (targetEnv) {
+          case 'rc':
+            return {
+              fire: fetchNui,
+            } as RpcCommunicationConfigurations<CE, TE>
+        }
+        break
+    }
+    return undefined as RpcCommunicationConfigurations<CE, TE>
+  }
+
+  /**
+   * Creates the listener for communication between environments.
+   * @param currentEnv - The current environment.
+   * @param targetEnv - The target environment.
+   * @param listeners - The contract with RPC methods.
+   * @returns  The contract and environments.
+   */
+  public createListener<CE extends Envs, TE extends Envs>(
+    currentEnv: CE,
+    targetEnv: TE,
+    listeners: ContractWithRpcMethods<C, CE, TE>,
+  ) {
+    if (!this.isBuilded()) {
+      throw new EvoGlobalError(
+        'You need to build the contract using [.build()] at the end.',
+      )
+    }
+
+    const canCommunicate = this.canEnvsCommunicate({
+      current: currentEnv,
+      target: targetEnv,
+      type: 'listener',
+    })
+
+    if (!canCommunicate) {
+      throw new EvoCommunicationError('Invalid communication environments')
+    }
+
+    const realEnv = getCurrentEnv()
+
+    if (realEnv !== currentEnv) {
+      throw new EvoEnvError(
+        'The specified environment does not match your real environment.',
+      )
+    }
+
+    for (const [rpcName, rpcMethod] of Object.entries(listeners)) {
+      const { args: argsSchema, returns: returnsSchema } =
+        this._contract[rpcName]
+
+      // example rs - rc
+      const rpcEventName = `${currentEnv}::${rpcName}::${targetEnv}::${this._contractUuid}`
+
+      const callback = async (
+        args: InferFromSchema<typeof argsSchema>,
+        responseEvent: string,
+      ): Promise<InferFromSchema<typeof returnsSchema>> => {
+        const src = getSrc()
+        try {
+          const parsedArgs = argsSchema
+            ? await getParsedArgs({ args: args, schema: argsSchema })
+            : undefined
+
+          const res = await (currentEnv === 'rs'
+            ? parsedArgs !== undefined
+              ? rpcMethod(parsedArgs, src)
+              : rpcMethod(src)
+            : rpcMethod(parsedArgs))
+
+          if (currentEnv === 'rs' && targetEnv === 'rc') {
+            const { fire } = this.getRpcMethodsForEnvs('rs', 'rc')
+
+            fire(responseEvent, src, { ok: true, data: res })
+          }
+
+          if (currentEnv === 'rc' && targetEnv === 'rs') {
+            const { fire } = this.getRpcMethodsForEnvs('rc', 'rs')
+
+            fire(responseEvent, { ok: true, data: res })
+          }
+        } catch (error) {
+          const errorPayload = {
+            ok: false,
+            error: {
+              message: (error as ErrorType).message,
+              type: (error as ErrorConstructor).constructor.name,
+            },
+          }
+
+          if (currentEnv === 'rs' && targetEnv === 'rc') {
+            const { fire } = this.getRpcMethodsForEnvs('rs', 'rc')
+
+            fire(responseEvent, src, errorPayload)
+          }
+
+          if (currentEnv === 'rc' && targetEnv === 'rs') {
+            const { fire } = this.getRpcMethodsForEnvs('rc', 'rs')
+
+            fire(responseEvent, errorPayload)
+          }
+        }
+      }
+
+      const nuiCallback = async (
+        args: InferFromSchema<typeof argsSchema>,
+        cb: Function,
+      ) => {
+        try {
+          const res = await rpcMethod(args)
+
+          cb({ ok: true, data: res })
+        } catch (error) {
+          cb({
+            ok: false,
+            error: {
+              message: (error as ErrorType).message,
+              type: (error as ErrorConstructor).constructor.name,
+            },
+          })
+        }
+      }
+
+      if (currentEnv === 'rc' && targetEnv === 'ui') {
+        const { subscribe } = this.getRpcMethodsForEnvs('rc', 'ui')
+        subscribe(rpcEventName, nuiCallback)
+      }
+
+      if (currentEnv === 'rs' && targetEnv === 'rc') {
+        const { subscribe } = this.getRpcMethodsForEnvs('rs', 'rc')
+
+        subscribe(rpcEventName, callback)
+      }
+
+      if (currentEnv === 'rc' && targetEnv === 'rs') {
+        const { subscribe } = this.getRpcMethodsForEnvs('rc', 'rs')
+        subscribe(rpcEventName, callback)
+      }
+    }
+
+    return { contract: this['_contract'], envs: { currentEnv, targetEnv } }
+  }
+
+  private canEnvsCommunicate({
+    current,
+    target,
+    type,
+  }: {
+    current: Envs
+    target: Envs
+    type: PossibleEnvsCommunicationKeys
+  }): boolean {
+    const targetMethod = PossibleEnvsCommunication[type]
+    return targetMethod.some(
+      ({ current: _current, target: _target }) =>
+        _current === current && _target === target,
     )
   }
 
-  for (const [rpcName, rpcMethod] of Object.entries(opts)) {
-    const { args: argsSchema, once = false } = contract[rpcName]
+  /**
+   * Creates the API for communication between environments.
+   * @param currentEnv - The current environment.
+   * @param targetEnv - The target environment.
+   * @returns The contract with RPC methods.
+   */
+  public createApi<CE extends Envs, TE extends Envs>(
+    currentEnv: CE,
+    targetEnv: TE,
+  ) {
+    const methods = {} as ContractWithRpcMethods<C, CE, TE>
 
-    const callback = async (args: unknown, responseEvent: ResponseEvent) => {
-      const src = getSrc()
+    if (!this.isBuilded()) {
+      throw new EvoGlobalError(
+        'You need to build the contract using [.build()] at the end.',
+      )
+    }
+    const realEnv = getCurrentEnv()
 
-      if (onceRequests.has(rpcName)) {
-        const errorMessage = `This event [${rpcName}] is \`once\` and has already been executed.`
-        return emitClientRpcError(
-          responseEvent,
-          { type: Errors.EvoOnceError, message: errorMessage },
-          src,
-        )
-      }
-
-      try {
-        const parsedArgs = argsSchema
-          ? await getParsedArgs({ args, schema: argsSchema })
-          : undefined
-
-        const res = await (parsedArgs !== undefined
-          ? rpcMethod(parsedArgs, src)
-          : rpcMethod(src))
-
-        emitClientRpcSuccess(responseEvent, res, src)
-
-        if (logger.active) {
-          const logMessage =
-            serverOptions?.logger?.logFormat || defauttLogFormat
-          logMessage(src, args)
-        }
-      } catch (error) {
-        const { message, type } = error as ErrorType
-        emitClientRpcError(responseEvent, { message, type }, src)
-      } finally {
-        once &&
-          (onceRequests.add(rpcName), removeEventListener(rpcName, callback))
-      }
+    if (realEnv !== currentEnv) {
+      throw new EvoEnvError(
+        'The specified environment does not match your real environment.',
+      )
     }
 
-    onNet(rpcName, callback)
-  }
-}
+    const canCommunicate = this.canEnvsCommunicate({
+      current: currentEnv,
+      target: targetEnv,
+      type: 'api',
+    })
 
-/**
- * Creates a client API with RPC methods based on the given contract.
- *
- * @template {Contract} C - The contract type.
- * @param {C} API - The contract and options object.
- * @returns {ContractWithRpcMethodsClient<C['contract']>} - The client API object.
- */
-export const createClientAPI = <
-  C extends { contract: Contract; options: ContractOptions },
->(
-  API: C,
-): ContractWithRpcMethodsClient<C['contract']> => {
-  const { contract, options } = API
-  const clientAPI = {} as ContractWithRpcMethodsClient<C['contract']>
+    if (!canCommunicate) {
+      throw new EvoCommunicationError('Invalid communication environments')
+    }
 
-  const onceRequests = new Set<string>()
+    for (const [rpcName, rpcMethod] of Object.entries(this._contract)) {
+      const {
+        args: argsSchema,
+        returns: returnsSchema,
+        retryOptions = { max: 0, delay: 1000, forceDelay: false },
+      } = rpcMethod
+      const rpcEventName = `${targetEnv}::${rpcName}::${currentEnv}::${this._contractUuid}`
 
-  for (const [methodName, methodValue] of Object.entries(contract)) {
-    const {
-      args: argsSchema,
-      returns: returnsSchema,
-      retryOptions = { max: 0, delay: 1000 },
-      once = false,
-    } = methodValue
+      if (retryOptions.delay! < 500 && !retryOptions.forceDelay) {
+        console.warn(
+          `The delay has been set back to 500ms. If you want to use [${retryOptions.delay}], please set 'forceDelay' to 'true'.`,
+        )
+        retryOptions.delay = 500
+      }
 
-    // @ts-ignore
-    clientAPI[methodName as keyof C['contract']] = (
-      args: InferFromSchema<typeof argsSchema>,
-    ) => {
-      return new Promise(async (resolve, reject) => {
-        if (onceRequests.has(methodName)) {
-          reject(
-            new EvoOnceError(
-              `Trying to call an event that is once and already executed ${methodName}`,
-            ),
-          )
-        }
-
-        let didTimedOut = false
-        let retrysCount = 0
-
-        try {
-          const parsedArgs = argsSchema
-            ? await getParsedArgs({ args, schema: argsSchema })
-            : undefined
-
-          const responseEvent = `${methodName}::${uuid()}`
+      if (retryOptions.max > 10) {
+        console.warn(
+          `The maximum retry limit has been set back to '10'. [${rpcName}]`,
+        )
+        retryOptions.max = 10
+      }
+      // @ts-expect-error
+      methods[rpcName as keyof C] = (
+        ...args: InferFromSchema<typeof argsSchema>
+      ): InferFromSchema<typeof returnsSchema> => {
+        return new Promise(async (resolve, reject) => {
+          const responseEvent = `${rpcName}::${uuid()}`
+          const realArgs = args[0]
+          const src = args?.[1]
+          let retrysCount = 0
+          let didTimedOut = false
           const _timeout = setTimeout(() => {
             didTimedOut = true
             removeEventListener(responseEvent, responseEventHandler)
-            reject(new EvoTimeoutError(`${methodName} has timed out !`))
-          }, options.timeout)
+            reject({
+              message: `${rpcName} has timed out !`,
+              type: 'EvoTimeoutError',
+            })
+          }, this._options.timeout)
+
+          const parsedArgs = argsSchema
+            ? await getParsedArgs({
+                args: realArgs,
+                schema: argsSchema,
+              })
+            : undefined
 
           const responseEventHandler = (
-            res: ServerResponse<InferFromSchema<typeof returnsSchema>>,
+            res: RpcResponse<InferFromSchema<typeof returnsSchema>>,
           ) => {
             if (didTimedOut) return
 
-            if (!res.ok) {
-              if (retryOptions.max > 0 && retrysCount < retryOptions.max) {
-                retrysCount++
-                return emitNet(methodName, parsedArgs, responseEvent)
+            if (res.ok) {
+              clearTimeout(_timeout)
+              resolve(res.data)
+              removeEventListener(responseEvent, responseEventHandler)
+              return
+            }
+
+            if (retryOptions.max > 0 && retrysCount < retryOptions.max) {
+              retrysCount++
+              if (currentEnv === 'rs' && targetEnv === 'rc') {
+                return emitNet(rpcEventName, src, parsedArgs, responseEvent)
               }
 
+              return emitNet(rpcEventName, parsedArgs, responseEvent)
+            }
+
+            return reject(res.error)
+          }
+
+          if (currentEnv === 'rs' && targetEnv === 'rc') {
+            const { subscribe, fire } = this.getRpcMethodsForEnvs('rs', 'rc')
+
+            subscribe(responseEvent, responseEventHandler)
+            fire(rpcEventName, src, parsedArgs, responseEvent)
+          }
+
+          if (currentEnv === 'rc' && targetEnv === 'rs') {
+            const { subscribe, fire } = this.getRpcMethodsForEnvs('rc', 'rs')
+
+            subscribe(responseEvent, responseEventHandler)
+            fire(rpcEventName, parsedArgs, responseEvent)
+          }
+
+          if (currentEnv === 'ui' && targetEnv === 'rc') {
+            const { fire } = this.getRpcMethodsForEnvs('ui', 'rc')
+            const res = await fire(rpcEventName, parsedArgs)
+            if (didTimedOut) return
+
+            if (res.ok) {
+              clearTimeout(_timeout)
+              return resolve(res)
+            }
+
+            if (retryOptions.max <= 0) {
               return reject(res.error)
             }
 
-            once && onceRequests.add(methodName)
+            while (retrysCount < retryOptions.max) {
+              retrysCount++
+              const retryRes = await fire(rpcEventName, parsedArgs)
 
-            resolve(res.data)
-            removeEventListener(responseEvent, responseEventHandler)
-            clearTimeout(_timeout)
+              if (retryRes.ok) {
+                return resolve(retryRes.data)
+              }
+
+              if (!retryRes.ok && retrysCount === retryOptions.max) {
+                return reject(retryRes.error)
+              }
+            }
           }
-
-          onNet(responseEvent, responseEventHandler)
-          emitNet(methodName, parsedArgs, responseEvent)
-        } catch (error) {
-          reject(error)
-        }
-      })
+        })
+      }
     }
+
+    return methods
   }
-
-  return clientAPI
 }
-
-/**
- * Merges two contracts into a single contract.
- *
- * @template {Contract} C1 - The first contract type.
- * @template {Contract} C2 - The second contract type.
- * @param {C1} contract1 - The first contract object.
- * @param {C2} contract2 - The second contract object.
- * @returns {MergedContract<C1, C2>} - The merged contract object.
- */
-export const mergeContracts = <C1 extends Contract, C2 extends Contract>(
-  contract1: C1,
-  contract2: C2,
-): MergedContract<C1, C2> => ({ ...contract1, ...contract2 })

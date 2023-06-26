@@ -1,14 +1,16 @@
-import { Errors } from './consts'
-
-export class EvoTimeoutError extends Error {
-  type = Errors.EvoTimeoutError
+export class EvoGlobalError extends Error {
   constructor(message: string) {
     super(message)
   }
 }
 
-export class EvoOnceError extends Error {
-  type = Errors.EvoOnceError
+export class EvoCommunicationError extends Error {
+  constructor(message: string) {
+    super(message)
+  }
+}
+
+export class EvoEnvError extends Error {
   constructor(message: string) {
     super(message)
   }

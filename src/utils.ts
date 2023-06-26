@@ -31,4 +31,10 @@ export const _customLog = (color: ColorValue, content: unknown) =>
 
 export const isFiveMEnv = () => typeof GetCurrentResourceName !== 'undefined'
 
+export const isUiEnv = () => typeof window !== 'undefined'
+
+export const isRcEnv = () => isFiveMEnv() && !IsDuplicityVersion()
+
+export const isRsEnv = () => isFiveMEnv() && Boolean(IsDuplicityVersion())
+
 export const getSrc = () => Number(globalThis.source)
