@@ -3,6 +3,7 @@ lockfileVersion: 5.4
 specifiers:
   '@citizenfx/client': 2.0.6514-1
   '@citizenfx/server': 2.0.6514-1
+  '@smaiill/evo': ^0.2.0
   '@types/node': ^20.3.1
   esbuild: ^0.18.4
   prettier: ^2.8.8
@@ -14,6 +15,7 @@ specifiers:
 devDependencies:
   '@citizenfx/client': 2.0.6514-1
   '@citizenfx/server': 2.0.6514-1
+  '@smaiill/evo': 0.2.0_zod@3.21.4
   '@types/node': 20.3.1
   esbuild: 0.18.5
   prettier: 2.8.8
@@ -645,6 +647,17 @@ packages:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.15.0
+    dev: true
+
+  /@smaiill/evo/0.2.0_zod@3.21.4:
+    resolution:
+      {
+        integrity: sha512-jiRXwt3vIkq9rYwgrPKt9KjpEElgIK0pMYoC+keV6FJxsqYAlrLN2xa5/QM13AtzoC9elPcmFwd5tYXmjvZRGQ==,
+      }
+    peerDependencies:
+      zod: ^3.21.4
+    dependencies:
+      zod: 3.21.4
     dev: true
 
   /@types/chai-subset/1.3.3:
